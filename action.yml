@@ -1,0 +1,407 @@
+name: 'PR Preview Deploy'
+description: 'Deploy PR previews to GitHub Pages gh-pages branch or cleanup on PR close'
+author: 'koizuka'
+
+branding:
+  icon: 'eye'
+  color: 'blue'
+
+inputs:
+  action:
+    description: 'Action to perform: deploy or cleanup'
+    required: true
+    default: 'deploy'
+
+  source-dir:
+    description: 'Path to built artifacts directory (required for deploy)'
+    required: false
+    default: 'dist'
+
+  base-url:
+    description: 'GitHub Pages base URL (e.g., https://owner.github.io/repo)'
+    required: true
+
+  token:
+    description: 'GitHub token for authentication (needs contents:write and pull-requests:write)'
+    required: true
+    default: ${{ github.token }}
+
+  pr-number:
+    description: 'Pull request number (auto-detected from context if not provided)'
+    required: false
+    default: ''
+
+  preview-path-prefix:
+    description: 'Path prefix for preview directories (default: pr)'
+    required: false
+    default: 'pr'
+
+  comment-enabled:
+    description: 'Whether to post/update PR comments (default: true)'
+    required: false
+    default: 'true'
+
+  wait-for-deployment:
+    description: 'Wait for GitHub Pages deployment to complete (default: true)'
+    required: false
+    default: 'true'
+
+  max-wait-time:
+    description: 'Maximum time to wait for deployment in seconds (default: 300)'
+    required: false
+    default: '300'
+
+  git-user-name:
+    description: 'Git user name for commits'
+    required: false
+    default: 'github-actions[bot]'
+
+  git-user-email:
+    description: 'Git user email for commits'
+    required: false
+    default: 'github-actions[bot]@users.noreply.github.com'
+
+outputs:
+  preview-url:
+    description: 'The deployed preview URL'
+    value: ${{ steps.set-outputs.outputs.preview-url }}
+
+  has-changes:
+    description: 'Whether there were changes to deploy'
+    value: ${{ steps.deploy.outputs.has_changes || steps.cleanup.outputs.has_changes || 'false' }}
+
+runs:
+  using: 'composite'
+  steps:
+    # Step 1: Validate inputs and set up variables
+    - name: Validate inputs and set variables
+      id: setup
+      shell: bash
+      run: |
+        # Determine PR number
+        PR_NUMBER="${{ inputs.pr-number }}"
+        if [ -z "$PR_NUMBER" ]; then
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+        fi
+
+        if [ -z "$PR_NUMBER" ]; then
+          echo "::error::PR number could not be determined. Please provide pr-number input or run from a pull_request event."
+          exit 1
+        fi
+
+        echo "pr-number=$PR_NUMBER" >> $GITHUB_OUTPUT
+
+        # Validate action input
+        ACTION="${{ inputs.action }}"
+        if [ "$ACTION" != "deploy" ] && [ "$ACTION" != "cleanup" ]; then
+          echo "::error::Invalid action '$ACTION'. Must be 'deploy' or 'cleanup'."
+          exit 1
+        fi
+        echo "action=$ACTION" >> $GITHUB_OUTPUT
+
+        # Validate source-dir for deploy action
+        if [ "$ACTION" = "deploy" ]; then
+          SOURCE_DIR="${{ inputs.source-dir }}"
+          if [ ! -d "$SOURCE_DIR" ]; then
+            echo "::error::Source directory '$SOURCE_DIR' does not exist."
+            exit 1
+          fi
+          echo "source-dir=$SOURCE_DIR" >> $GITHUB_OUTPUT
+        fi
+
+        # Construct preview URL
+        BASE_URL="${{ inputs.base-url }}"
+        # Remove trailing slash if present
+        BASE_URL="${BASE_URL%/}"
+        PREVIEW_PATH="${{ inputs.preview-path-prefix }}/$PR_NUMBER"
+        PREVIEW_URL="$BASE_URL/$PREVIEW_PATH/"
+        echo "preview-url=$PREVIEW_URL" >> $GITHUB_OUTPUT
+        echo "preview-path=$PREVIEW_PATH" >> $GITHUB_OUTPUT
+
+    # Step 2: Check for existing preview comment (deploy only)
+    - name: Check for existing preview comment
+      id: check_comment
+      if: inputs.action == 'deploy' && inputs.comment-enabled == 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const prNumber = parseInt('${{ steps.setup.outputs.pr-number }}');
+
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: prNumber,
+          });
+
+          const existingComment = comments.find(comment =>
+            comment.user.type === 'Bot' &&
+            comment.body.includes('<!-- PR Preview Comment -->')
+          );
+
+          core.setOutput('exists', existingComment ? 'true' : 'false');
+          core.setOutput('comment-id', existingComment ? existingComment.id : '');
+          console.log(`Existing preview comment: ${existingComment ? 'found (ID: ' + existingComment.id + ')' : 'not found'}`);
+
+    # Step 3: Create initial "in progress" comment (deploy only, first time)
+    - name: Create initial PR comment
+      if: inputs.action == 'deploy' && inputs.comment-enabled == 'true' && steps.check_comment.outputs.exists != 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const prNumber = parseInt('${{ steps.setup.outputs.pr-number }}');
+
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: prNumber,
+            body: `<!-- PR Preview Comment -->
+          ## Preview Deployment in Progress...
+
+          Your preview is being deployed. Please wait a moment.
+
+          > This comment will be updated with the preview URL once deployment is complete.
+          `,
+          });
+
+    # Step 4: Clone gh-pages branch
+    - name: Clone gh-pages branch
+      id: clone
+      shell: bash
+      run: |
+        # Configure git
+        git config --global user.name "${{ inputs.git-user-name }}"
+        git config --global user.email "${{ inputs.git-user-email }}"
+
+        # Clone gh-pages branch
+        if git clone --single-branch --branch gh-pages \
+          "https://x-access-token:${{ inputs.token }}@github.com/${{ github.repository }}.git" \
+          gh-pages-workdir 2>/dev/null; then
+          echo "gh-pages-exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "gh-pages branch doesn't exist"
+          if [ "${{ inputs.action }}" = "cleanup" ]; then
+            echo "Nothing to cleanup - gh-pages branch doesn't exist"
+            echo "gh-pages-exists=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # For deploy, create the gh-pages branch
+          echo "Creating new gh-pages branch..."
+          git clone "https://x-access-token:${{ inputs.token }}@github.com/${{ github.repository }}.git" gh-pages-workdir
+          cd gh-pages-workdir
+          git checkout --orphan gh-pages
+          git rm -rf . 2>/dev/null || true
+          echo "# GitHub Pages" > README.md
+          git add README.md
+          git commit -m "Initial gh-pages commit"
+          git push origin gh-pages
+          cd ..
+          echo "gh-pages-exists=true" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 5: Deploy preview (deploy action only)
+    - name: Deploy to PR subdirectory
+      id: deploy
+      if: inputs.action == 'deploy' && steps.clone.outputs.gh-pages-exists == 'true'
+      shell: bash
+      run: |
+        cd gh-pages-workdir
+
+        # Fetch latest changes
+        git fetch origin gh-pages
+
+        # Rebase if there are remote changes
+        if ! git diff --quiet HEAD origin/gh-pages 2>/dev/null; then
+          echo "Remote changes detected, rebasing..."
+          if ! git pull --rebase origin gh-pages; then
+            if [ -d ".git/rebase-merge" ] || [ -d ".git/rebase-apply" ]; then
+              echo "::error::Rebase conflict detected"
+              git rebase --abort
+              exit 1
+            fi
+          fi
+        fi
+
+        cd ..
+
+        # Create PR preview directory
+        PREVIEW_PATH="${{ steps.setup.outputs.preview-path }}"
+        mkdir -p "gh-pages-workdir/$PREVIEW_PATH"
+
+        # Copy built files
+        cp -r "${{ steps.setup.outputs.source-dir }}"/* "gh-pages-workdir/$PREVIEW_PATH/"
+
+        # Commit and push with retry logic
+        cd gh-pages-workdir
+        git add .
+
+        if git diff --cached --quiet; then
+          echo "No changes to deploy - preview is already up to date"
+          echo "has_changes=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        git commit -m "Deploy PR #${{ steps.setup.outputs.pr-number }} preview"
+
+        # Retry push with exponential backoff
+        PUSH_SUCCESS=0
+        MAX_RETRIES=5
+
+        for i in $(seq 1 $MAX_RETRIES); do
+          echo "Push attempt $i of $MAX_RETRIES..."
+
+          if git push origin gh-pages 2>&1; then
+            echo "Successfully pushed to gh-pages on attempt $i"
+            PUSH_SUCCESS=1
+            break
+          fi
+
+          echo "Push failed on attempt $i"
+
+          if [ $i -lt $MAX_RETRIES ]; then
+            git fetch origin gh-pages
+
+            if ! git pull --rebase origin gh-pages; then
+              if [ -d ".git/rebase-merge" ] || [ -d ".git/rebase-apply" ]; then
+                echo "::error::Rebase conflict detected in retry loop"
+                git rebase --abort
+                exit 1
+              fi
+            fi
+
+            # Exponential backoff with jitter
+            BACKOFF=$((2 ** i))
+            JITTER=$((RANDOM % 3))
+            SLEEP_TIME=$((BACKOFF + JITTER))
+            echo "Waiting ${SLEEP_TIME} seconds before retry..."
+            sleep $SLEEP_TIME
+          fi
+        done
+
+        if [ $PUSH_SUCCESS -eq 0 ]; then
+          echo "::error::Failed to push to gh-pages after $MAX_RETRIES attempts"
+          exit 1
+        fi
+
+        echo "has_changes=true" >> $GITHUB_OUTPUT
+
+    # Step 6: Cleanup preview (cleanup action only)
+    - name: Remove PR preview directory
+      id: cleanup
+      if: inputs.action == 'cleanup' && steps.clone.outputs.gh-pages-exists == 'true'
+      shell: bash
+      run: |
+        cd gh-pages-workdir
+
+        PREVIEW_PATH="${{ steps.setup.outputs.preview-path }}"
+        PREFIX="${{ inputs.preview-path-prefix }}"
+
+        if [ -d "$PREVIEW_PATH" ]; then
+          echo "Removing PR #${{ steps.setup.outputs.pr-number }} preview directory"
+          rm -rf "$PREVIEW_PATH"
+
+          # Remove prefix directory if empty
+          if [ -d "$PREFIX" ] && [ -z "$(ls -A "$PREFIX")" ]; then
+            echo "Removing empty $PREFIX directory"
+            rm -rf "$PREFIX"
+          fi
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          git commit -m "Remove PR #${{ steps.setup.outputs.pr-number }} preview"
+          git push origin gh-pages
+
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "Successfully removed PR #${{ steps.setup.outputs.pr-number }} preview"
+        else
+          echo "PR #${{ steps.setup.outputs.pr-number }} preview directory not found"
+          echo "has_changes=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 7: Wait for GitHub Pages deployment (deploy only)
+    - name: Wait for GitHub Pages deployment
+      if: inputs.action == 'deploy' && steps.deploy.outputs.has_changes == 'true' && inputs.wait-for-deployment == 'true'
+      shell: bash
+      run: |
+        PREVIEW_URL="${{ steps.setup.outputs.preview-url }}"
+        MAX_WAIT="${{ inputs.max-wait-time }}"
+        INTERVAL=5
+        MAX_ATTEMPTS=$((MAX_WAIT / INTERVAL))
+        ATTEMPT=0
+
+        echo "Waiting for preview to be available at: $PREVIEW_URL"
+
+        until [ $ATTEMPT -ge $MAX_ATTEMPTS ]; do
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$PREVIEW_URL" || echo "000")
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "Preview is available! (HTTP $HTTP_CODE)"
+            exit 0
+          fi
+
+          ATTEMPT=$((ATTEMPT + 1))
+          echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: HTTP $HTTP_CODE - waiting ${INTERVAL}s..."
+          sleep $INTERVAL
+        done
+
+        echo "::warning::Preview may not be ready yet (last status: $HTTP_CODE)"
+
+    # Step 8: Update PR comment with preview URL (deploy only)
+    - name: Update PR comment with preview URL
+      if: inputs.action == 'deploy' && inputs.comment-enabled == 'true' && steps.check_comment.outputs.exists != 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const prNumber = parseInt('${{ steps.setup.outputs.pr-number }}');
+          const previewUrl = '${{ steps.setup.outputs.preview-url }}';
+
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: prNumber,
+          });
+
+          const botComment = comments.find(comment =>
+            comment.user.type === 'Bot' &&
+            comment.body.includes('<!-- PR Preview Comment -->')
+          );
+
+          const commentBody = `<!-- PR Preview Comment -->
+          ## Preview Deployed!
+
+          Your preview is available at: ${previewUrl}
+
+          > This preview will be automatically removed when the PR is closed.
+          `;
+
+          if (botComment) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: commentBody,
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: commentBody,
+            });
+          }
+
+    # Step 9: Set outputs
+    - name: Set outputs
+      id: set-outputs
+      shell: bash
+      run: |
+        echo "preview-url=${{ steps.setup.outputs.preview-url }}" >> $GITHUB_OUTPUT
