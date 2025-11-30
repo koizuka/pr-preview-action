@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Lint action.yml
+        run: |
+          # Install actionlint
+          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+
+          # Lint workflow files
+          ./actionlint -color
+
+      - name: Validate YAML syntax
+        run: |
+          # Check action.yml is valid YAML
+          python3 -c "import yaml; yaml.safe_load(open('action.yml'))"
