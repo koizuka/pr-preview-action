@@ -1,6 +1,8 @@
 # PR Preview Action
 
-A reusable GitHub Composite Action for deploying pull request previews to GitHub Pages.
+A GitHub Action that automatically deploys pull request previews to GitHub Pages and cleans them up when the PR is closed.
+
+When a PR is opened or updated, this action deploys a preview to `https://your-site.github.io/repo/pr/<PR_NUMBER>/` and posts a comment with the preview URL.
 
 ## Features
 
@@ -10,6 +12,17 @@ A reusable GitHub Composite Action for deploying pull request previews to GitHub
 - **Retry Logic**: Exponential backoff for concurrent deployments
 - **Deployment Wait**: Polls preview URL until available
 - **Configurable**: Customizable paths, comments, timeouts
+
+## Prerequisites
+
+1. **GitHub Pages enabled** on your repository
+   - Go to Settings > Pages
+   - Source: "Deploy from a branch"
+   - Branch: `gh-pages` / `/ (root)`
+
+2. **Build output with correct base path**
+   - Your build must be configured with the PR-specific base path
+   - See [Build Configuration](#build-configuration) for examples
 
 ## Usage
 
@@ -172,6 +185,88 @@ concurrency:
   group: "github-pages-deployment"
   cancel-in-progress: false
 ```
+
+## Build Configuration
+
+Your build tool must output assets with the correct base path for PR previews.
+
+### Vite
+
+Create a dynamic config in your workflow:
+
+```yaml
+- name: Build with PR-specific base path
+  run: |
+    cat > vite.config.pr.ts << 'EOF'
+    import { defineConfig } from 'vite'
+    import react from '@vitejs/plugin-react'
+
+    export default defineConfig({
+      plugins: [react()],
+      base: '/your-repo/pr/${{ github.event.pull_request.number }}/',
+    })
+    EOF
+
+    npx vite build --config vite.config.pr.ts
+```
+
+### Webpack
+
+```yaml
+- name: Build with PR-specific base path
+  env:
+    BASE_PATH: /your-repo/pr/${{ github.event.pull_request.number }}/
+  run: |
+    cat > webpack.pr.config.js << 'EOF'
+    import baseConfig from './webpack.config.js';
+
+    export default {
+      ...baseConfig,
+      output: {
+        ...baseConfig.output,
+        publicPath: process.env.BASE_PATH || '/',
+      },
+    };
+    EOF
+
+    NODE_ENV=production npx webpack --config webpack.pr.config.js
+```
+
+### Next.js
+
+```yaml
+- name: Build with PR-specific base path
+  run: |
+    npx next build
+    npx next export -o out
+  env:
+    NEXT_PUBLIC_BASE_PATH: /your-repo/pr/${{ github.event.pull_request.number }}
+```
+
+## Troubleshooting
+
+### Preview URL returns 404
+
+- Ensure GitHub Pages is enabled and set to deploy from `gh-pages` branch
+- Check that your build output has the correct base path
+- Wait a few minutes for GitHub Pages to deploy (this action waits up to 5 minutes by default)
+
+### Push conflicts
+
+This action uses exponential backoff retry (up to 5 attempts) to handle concurrent deployments. If you still see conflicts:
+- Ensure all workflows use the same concurrency group
+- Set `cancel-in-progress: false` to prevent cancellation during deployment
+
+### Comment not appearing
+
+- Ensure `pull-requests: write` permission is set
+- Check if `comment-enabled` input is set to `true` (default)
+
+## Limitations
+
+- Only works with GitHub Pages deployed from `gh-pages` branch
+- Requires build artifacts to be pre-built with the correct base path
+- PR previews are stored in `pr/<number>/` subdirectory (not customizable path structure)
 
 ## License
 
