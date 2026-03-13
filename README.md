@@ -7,7 +7,7 @@ When a PR is opened or updated, this action deploys a preview to `https://your-s
 ## Features
 
 - **Deploy Mode**: Deploy PR preview to `gh-pages` branch under `pr/<PR_NUMBER>/`
-- **Cleanup Mode**: Remove PR preview when PR is closed
+- **Cleanup Mode**: Remove all closed PR previews at once (idempotent)
 - **PR Comments**: Automatic "in progress" and "deployed" comments
 - **Retry Logic**: Exponential backoff for concurrent deployments
 - **Deployment Wait**: Polls preview URL until available
@@ -95,7 +95,7 @@ permissions:
 
 concurrency:
   group: "github-pages-deployment"
-  cancel-in-progress: false
+  cancel-in-progress: true  # Cleanup is idempotent (removes all closed PRs), so last-one-wins is safe
 
 jobs:
   cleanup:
@@ -109,6 +109,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
+> **Note**: Since v1.1.0, cleanup scans all PR preview directories and removes those for closed PRs. This makes cleanup idempotent, so `cancel-in-progress: true` is recommended.
+
 ## Inputs
 
 | Input | Description | Required | Default |
@@ -117,7 +119,7 @@ jobs:
 | `source-dir` | Path to built artifacts (deploy only) | No | `dist` |
 | `base-url` | GitHub Pages base URL | Yes | - |
 | `token` | GitHub token | Yes | `${{ github.token }}` |
-| `pr-number` | PR number (auto-detected) | No | - |
+| `pr-number` | PR number (auto-detected; required for deploy, not needed for cleanup) | No | - |
 | `preview-path-prefix` | Preview directory prefix | No | `pr` |
 | `comment-enabled` | Enable PR comments | No | `true` |
 | `wait-for-deployment` | Wait for deployment | No | `true` |
@@ -155,11 +157,11 @@ permissions:
 
 ### Cleanup Mode
 
-1. Validates inputs and determines PR number
-2. Clones `gh-pages` branch (exits gracefully if not exists)
-3. Removes `pr/<PR_NUMBER>/` directory
-4. Removes `pr/` directory if empty
-5. Commits and pushes changes
+1. Clones `gh-pages` branch (exits gracefully if not exists)
+2. Scans `pr/` directory for all PR preview directories
+3. Checks each PR's status via GitHub API
+4. Removes directories for closed/merged PRs
+5. Commits and pushes with retry logic (exponential backoff)
 
 ## Directory Structure on gh-pages
 
@@ -178,12 +180,18 @@ gh-pages/
 
 ## Concurrency
 
-Use a shared concurrency group to prevent race conditions:
+Use a shared concurrency group to prevent race conditions when pushing to gh-pages:
 
 ```yaml
+# For deploy workflows (PR preview):
 concurrency:
   group: "github-pages-deployment"
   cancel-in-progress: false
+
+# For cleanup workflows (idempotent, last-one-wins is safe):
+concurrency:
+  group: "github-pages-deployment"
+  cancel-in-progress: true
 ```
 
 ## Build Configuration
@@ -253,9 +261,9 @@ Create a dynamic config in your workflow:
 
 ### Push conflicts
 
-This action uses exponential backoff retry (up to 5 attempts) to handle concurrent deployments. If you still see conflicts:
+Both deploy and cleanup use exponential backoff retry (up to 5 attempts) to handle concurrent pushes. If you still see conflicts:
 - Ensure all workflows use the same concurrency group
-- Set `cancel-in-progress: false` to prevent cancellation during deployment
+- Set `cancel-in-progress: false` for deploy workflows to prevent cancellation during deployment
 
 ### Comment not appearing
 
