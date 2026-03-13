@@ -95,7 +95,7 @@ permissions:
 
 concurrency:
   group: "github-pages-deployment"
-  cancel-in-progress: true  # Cleanup is idempotent (removes all closed PRs), so last-one-wins is safe
+  cancel-in-progress: false
 
 jobs:
   cleanup:
@@ -109,7 +109,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-> **Note**: Since v1.1.0, cleanup scans all PR preview directories and removes those for closed PRs. This makes cleanup idempotent, so `cancel-in-progress: true` is recommended.
+> **Note**: Since v1.1.0, cleanup scans all PR preview directories and removes those for closed PRs. This makes cleanup idempotent — if a cleanup run is cancelled by concurrency, the next run will handle all pending removals.
 
 ## Inputs
 
@@ -183,16 +183,12 @@ gh-pages/
 Use a shared concurrency group to prevent race conditions when pushing to gh-pages:
 
 ```yaml
-# For deploy workflows (PR preview):
 concurrency:
   group: "github-pages-deployment"
   cancel-in-progress: false
-
-# For cleanup workflows (idempotent, last-one-wins is safe):
-concurrency:
-  group: "github-pages-deployment"
-  cancel-in-progress: true
 ```
+
+> **Important**: Use `cancel-in-progress: false` for both deploy and cleanup workflows. Using `cancel-in-progress: true` would cancel other jobs in the same concurrency group (e.g., production deploys). Cleanup is idempotent since v1.1.0, so cancelled pending cleanups are safely handled by subsequent runs.
 
 ## Build Configuration
 
