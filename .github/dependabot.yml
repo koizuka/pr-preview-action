@@ -8,3 +8,5 @@ updates:
       prefix: "chore(deps)"
     labels:
       - "dependencies"
+    cooldown:
+      default-days: 7
