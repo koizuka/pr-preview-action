@@ -124,7 +124,7 @@ runs:
     - name: Check for existing preview comment
       id: check_comment
       if: inputs.action == 'deploy' && inputs.comment-enabled == 'true'
-      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       with:
         github-token: ${{ inputs.token }}
         script: |
@@ -148,7 +148,7 @@ runs:
     # Step 3: Create initial "in progress" comment (deploy only, first time)
     - name: Create initial PR comment
       if: inputs.action == 'deploy' && inputs.comment-enabled == 'true' && steps.check_comment.outputs.exists != 'true'
-      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       with:
         github-token: ${{ inputs.token }}
         script: |
@@ -453,7 +453,7 @@ runs:
     # Step 8: Update PR comment with preview URL (deploy only)
     - name: Update PR comment with preview URL
       if: inputs.action == 'deploy' && inputs.comment-enabled == 'true' && steps.check_comment.outputs.exists != 'true'
-      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       with:
         github-token: ${{ inputs.token }}
         script: |
