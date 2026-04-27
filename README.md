@@ -259,7 +259,16 @@ Create a dynamic config in your workflow:
 
 Both deploy and cleanup use exponential backoff retry (up to 5 attempts) to handle concurrent pushes. If you still see conflicts:
 - Ensure all workflows use the same concurrency group
-- Set `cancel-in-progress: false` for deploy workflows to prevent cancellation during deployment
+- Set `cancel-in-progress: false` for **both deploy and cleanup** workflows to prevent cancellation during deployment
+
+### PR preview deployments are skipped or cancelled
+
+If you get many PRs at once (e.g. from Dependabot batches) and notice that some `pr-preview` deploys never run or finish as `cancelled`, check your **cleanup** workflow's `cancel-in-progress` setting:
+
+- ❌ `cancel-in-progress: true` on a cleanup workflow that shares the `github-pages-deployment` group will cancel pending **deploy** runs in the same group, dropping previews on the floor.
+- ✅ Set `cancel-in-progress: false` on **both** deploy and cleanup workflows. Cleanup is idempotent since v1.1.0, so cancelled cleanups are safely picked up by subsequent runs.
+
+Older versions of this README briefly recommended `cancel-in-progress: true` for cleanup; if you copied from an older example, update it to `false`.
 
 ### Comment not appearing
 
