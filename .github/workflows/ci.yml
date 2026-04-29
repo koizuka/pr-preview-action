@@ -18,8 +18,10 @@ jobs:
 
       - name: Run actionlint
         run: |
-          # Pin download script to actionlint v1.7.0 commit (rather than main)
-          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/f970a14472c1b4d576f8456884a3238aa353a288/scripts/download-actionlint.bash) 1.7.0
+          # Pin download script to actionlint v1.7.0 commit (rather than main).
+          # `curl -fsSL` fails fast on HTTP errors so a transient 5xx or rate-limit
+          # response can't be silently piped into bash as an HTML error page.
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/f970a14472c1b4d576f8456884a3238aa353a288/scripts/download-actionlint.bash) 1.7.0
           ./actionlint -color -shellcheck=shellcheck
 
   action-schema:
@@ -39,48 +41,54 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet --user pyyaml==6.0.2
+
       - name: Extract bash steps and run shellcheck
         run: |
-          set -euo pipefail
-          # Pattern matches GitHub expression syntax in action.yml.
-          # Uses [{] / [}] character classes to avoid a literal ${ {  }} token,
-          # which actionlint would otherwise parse as a workflow expression.
-          GHA_EXPR_PATTERN='\$[{][{][^}]*[}][}]'
-          count=$(yq '.runs.steps | length' action.yml)
-          fail=0
-          for i in $(seq 0 $((count - 1))); do
-            shell=$(yq -r ".runs.steps[$i].shell // \"\"" action.yml)
-            [ "$shell" = "bash" ] || continue
-            name=$(yq -r ".runs.steps[$i].name // \"(unnamed)\"" action.yml)
-            body=$(yq -r ".runs.steps[$i].run" action.yml)
-            tmp=$(mktemp --suffix=.sh)
-            {
-              echo '#!/usr/bin/env bash'
-              # GHA_EXPR is a synthetic placeholder — silence "var unassigned" warning
-              echo '# shellcheck disable=SC2154'
+          python3 - <<'PY'
+          import yaml, subprocess, re, tempfile, os, sys
+          # Match the GitHub Actions expression syntax. Character classes
+          # [{] / [}] avoid placing the literal expression token here, which
+          # actionlint would otherwise try to parse as a workflow expression.
+          gha_expr = re.compile(r'\$[{][{][^}]*[}][}]')
+          with open('action.yml') as f:
+              doc = yaml.safe_load(f)
+          fail = 0
+          for i, s in enumerate(doc['runs']['steps']):
+              if s.get('shell') != 'bash':
+                  continue
+              name = s.get('name', '(unnamed)')
               # Replace GitHub expressions with a synthetic shell variable so the
-              # script is parseable by shellcheck. Literal $GHA_EXPR is intended;
-              # SC2016 (single-quoted $) does not apply to this rewrite step.
-              # shellcheck disable=SC2016
-              printf '%s\n' "$body" | sed -E "s/${GHA_EXPR_PATTERN}/\$GHA_EXPR/g"
-            } > "$tmp"
-            echo "::group::Step $i: $name"
-            if ! shellcheck "$tmp"; then
-              fail=$((fail + 1))
-            fi
-            echo "::endgroup::"
-            rm -f "$tmp"
-          done
-          if [ "$fail" -gt 0 ]; then
-            echo "::error::shellcheck found issues in $fail step(s) of action.yml"
-            exit 1
-          fi
+              # script is parseable by shellcheck.
+              body = gha_expr.sub('$GHA_EXPR', s['run'])
+              script = (
+                  "#!/usr/bin/env bash\n"
+                  "# shellcheck disable=SC2154  # GHA_EXPR is synthetic\n"
+                  + body + "\n"
+              )
+              with tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False) as tf:
+                  tf.write(script)
+                  tmp = tf.name
+              print(f"::group::Step {i}: {name}", flush=True)
+              rc = subprocess.run(['shellcheck', tmp]).returncode
+              print("::endgroup::", flush=True)
+              if rc != 0:
+                  fail += 1
+              os.unlink(tmp)
+          if fail > 0:
+              print(f"::error::shellcheck found issues in {fail} step(s) of action.yml")
+              sys.exit(1)
+          PY
 
   yamllint:
     name: Lint YAML style
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install yamllint
+        run: pipx install yamllint==1.38.0
 
       - name: Run yamllint
         run: yamllint action.yml .github/workflows/
