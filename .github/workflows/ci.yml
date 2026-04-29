@@ -6,21 +6,119 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  lint:
+  actionlint:
+    name: Lint workflows (actionlint + shellcheck)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Lint action.yml
+      - name: Run actionlint
         run: |
-          # Install actionlint
-          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          # Pin download script to actionlint v1.7.0 commit (rather than main)
+          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/f970a14472c1b4d576f8456884a3238aa353a288/scripts/download-actionlint.bash) 1.7.0
+          ./actionlint -color -shellcheck=shellcheck
 
-          # Lint workflow files
-          ./actionlint -color
+  action-schema:
+    name: Validate action.yml schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Validate YAML syntax
+      - name: Validate action.yml
+        uses: mpalmer/action-validator@c994f427b7c42cd5ecb1bc9315cb91c3d7d72e3d # v0.9.0
+        with:
+          path: action.yml
+
+  shellcheck-action:
+    name: Shellcheck inline bash in action.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Extract bash steps and run shellcheck
         run: |
-          # Check action.yml is valid YAML
-          python3 -c "import yaml; yaml.safe_load(open('action.yml'))"
+          set -euo pipefail
+          # Pattern matches GitHub expression syntax in action.yml.
+          # Uses [{] / [}] character classes to avoid a literal ${ {  }} token,
+          # which actionlint would otherwise parse as a workflow expression.
+          GHA_EXPR_PATTERN='\$[{][{][^}]*[}][}]'
+          count=$(yq '.runs.steps | length' action.yml)
+          fail=0
+          for i in $(seq 0 $((count - 1))); do
+            shell=$(yq -r ".runs.steps[$i].shell // \"\"" action.yml)
+            [ "$shell" = "bash" ] || continue
+            name=$(yq -r ".runs.steps[$i].name // \"(unnamed)\"" action.yml)
+            body=$(yq -r ".runs.steps[$i].run" action.yml)
+            tmp=$(mktemp --suffix=.sh)
+            {
+              echo '#!/usr/bin/env bash'
+              # GHA_EXPR is a synthetic placeholder — silence "var unassigned" warning
+              echo '# shellcheck disable=SC2154'
+              # Replace GitHub expressions with a synthetic shell variable so the
+              # script is parseable by shellcheck. Literal $GHA_EXPR is intended;
+              # SC2016 (single-quoted $) does not apply to this rewrite step.
+              # shellcheck disable=SC2016
+              printf '%s\n' "$body" | sed -E "s/${GHA_EXPR_PATTERN}/\$GHA_EXPR/g"
+            } > "$tmp"
+            echo "::group::Step $i: $name"
+            if ! shellcheck "$tmp"; then
+              fail=$((fail + 1))
+            fi
+            echo "::endgroup::"
+            rm -f "$tmp"
+          done
+          if [ "$fail" -gt 0 ]; then
+            echo "::error::shellcheck found issues in $fail step(s) of action.yml"
+            exit 1
+          fi
+
+  yamllint:
+    name: Lint YAML style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Run yamllint
+        run: yamllint action.yml .github/workflows/
+
+  markdownlint:
+    name: Lint Markdown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Run markdownlint-cli2
+        uses: DavidAnson/markdownlint-cli2-action@eb5ca3ab411449c66620fe7f1b3c9e10547144b0 # v18.0.0
+        with:
+          globs: '**/*.md'
+
+  hash-pin-check:
+    name: Enforce SHA-pinned action references
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: "Verify all uses: are pinned to a 40-char SHA"
+        run: |
+          set -euo pipefail
+          # Match `uses: <owner>/<repo>...@<ref>` where ref is not a 40-char hex SHA.
+          # Skip local action references (uses: ./...). Strip comments before matching.
+          violations=$(
+            grep -rEn '^[[:space:]]*-?[[:space:]]*uses:[[:space:]]+' \
+              .github/workflows action.yml \
+            | sed -E 's/[[:space:]]+#.*$//' \
+            | grep -vE 'uses:[[:space:]]+\./' \
+            | grep -E 'uses:[[:space:]]+[^[:space:]]+@[^[:space:]]+' \
+            | grep -vE '@[0-9a-f]{40}([[:space:]]*$|[[:space:]])' \
+            || true
+          )
+          if [ -n "$violations" ]; then
+            echo "::error::Unpinned action references found (must be pinned by 40-char commit SHA):"
+            echo "$violations"
+            exit 1
+          fi
+          echo "All action references are SHA-pinned."

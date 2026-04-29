@@ -8,15 +8,18 @@ GitHub Composite Action for deploying PR previews to gh-pages branch.
 
 ## Project Structure
 
-```
+```text
 .
 ├── action.yml              # Main composite action definition
 ├── README.md               # User documentation
+├── CLAUDE.md               # Project notes for Claude Code
 ├── LICENSE                 # MIT License
+├── .yamllint               # yamllint config (YAML style)
+├── .markdownlint.json      # markdownlint-cli2 config
 └── .github/
     ├── dependabot.yml      # Dependabot config for action updates
     └── workflows/
-        ├── ci.yml          # Lint and validate action.yml
+        ├── ci.yml          # Lint & validate (actionlint, shellcheck, yamllint, markdownlint, schema, hash-pinning)
         └── release.yml     # Auto-update major version tag on release
 ```
 
@@ -37,6 +40,7 @@ GitHub Composite Action for deploying PR previews to gh-pages branch.
 ### Testing Changes
 
 This action cannot be easily unit tested. Test by:
+
 1. Creating a test repository
 2. Using the action from a branch: `uses: koizuka/pr-preview-action@branch-name`
 
@@ -55,7 +59,19 @@ Uses `actions/github-script` for PR comment management. Version pinned by commit
 ## Conventions
 
 - Commit messages: Use conventional commits (e.g., `chore:`, `fix:`, `feat:`)
-- Action versions: Pin by commit hash with version comment (e.g., `@abc123 # v1.0.0`)
+- Action versions: Pin by commit hash with version comment (e.g., `@abc123 # v1.0.0`).
+  Enforced by the `hash-pin-check` job in CI.
+
+## CI Checks
+
+The `ci.yml` workflow runs six parallel jobs:
+
+- `actionlint` — workflow lint with shellcheck integration
+- `action-schema` — `mpalmer/action-validator` against the official action schema
+- `shellcheck-action` — extracts each `shell: bash` step from `action.yml` and runs shellcheck
+- `yamllint` — YAML style for `action.yml` and workflows
+- `markdownlint` — Markdown lint for `**/*.md`
+- `hash-pin-check` — enforces 40-char SHA pinning on every `uses:` reference
 
 ## Usage Example
 
