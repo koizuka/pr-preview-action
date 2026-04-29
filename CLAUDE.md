@@ -2,9 +2,8 @@
 
 GitHub Composite Action for deploying PR previews to gh-pages branch.
 
-## Current Version
-
-- **v1.0.0**: `e7366d355cc0c6a1b7d96965f1d3c82a82287297`
+For the current version, run `gh release list` or check
+<https://github.com/koizuka/pr-preview-action/releases>.
 
 ## Project Structure
 
