@@ -84,7 +84,7 @@ runs:
           echo "::error::Invalid action '$ACTION'. Must be 'deploy' or 'cleanup'."
           exit 1
         fi
-        echo "action=$ACTION" >> $GITHUB_OUTPUT
+        echo "action=$ACTION" >> "$GITHUB_OUTPUT"
 
         # Determine PR number (required for deploy, optional for cleanup)
         PR_NUMBER="${{ inputs.pr-number }}"
@@ -97,7 +97,7 @@ runs:
           exit 1
         fi
 
-        echo "pr-number=$PR_NUMBER" >> $GITHUB_OUTPUT
+        echo "pr-number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
         # Validate source-dir for deploy action
         if [ "$ACTION" = "deploy" ]; then
@@ -106,7 +106,7 @@ runs:
             echo "::error::Source directory '$SOURCE_DIR' does not exist."
             exit 1
           fi
-          echo "source-dir=$SOURCE_DIR" >> $GITHUB_OUTPUT
+          echo "source-dir=$SOURCE_DIR" >> "$GITHUB_OUTPUT"
         fi
 
         # Construct preview URL (deploy only)
@@ -116,8 +116,8 @@ runs:
           BASE_URL="${BASE_URL%/}"
           PREVIEW_PATH="${{ inputs.preview-path-prefix }}/$PR_NUMBER"
           PREVIEW_URL="$BASE_URL/$PREVIEW_PATH/"
-          echo "preview-url=$PREVIEW_URL" >> $GITHUB_OUTPUT
-          echo "preview-path=$PREVIEW_PATH" >> $GITHUB_OUTPUT
+          echo "preview-url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
+          echo "preview-path=$PREVIEW_PATH" >> "$GITHUB_OUTPUT"
         fi
 
     # Step 2: Check for existing preview comment (deploy only)
@@ -180,27 +180,28 @@ runs:
         if git clone --single-branch --branch gh-pages \
           "https://x-access-token:${{ inputs.token }}@github.com/${{ github.repository }}.git" \
           gh-pages-workdir 2>/dev/null; then
-          echo "gh-pages-exists=true" >> $GITHUB_OUTPUT
+          echo "gh-pages-exists=true" >> "$GITHUB_OUTPUT"
         else
           echo "gh-pages branch doesn't exist"
           if [ "${{ inputs.action }}" = "cleanup" ]; then
             echo "Nothing to cleanup - gh-pages branch doesn't exist"
-            echo "gh-pages-exists=false" >> $GITHUB_OUTPUT
+            echo "gh-pages-exists=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           # For deploy, create the gh-pages branch
           echo "Creating new gh-pages branch..."
           git clone "https://x-access-token:${{ inputs.token }}@github.com/${{ github.repository }}.git" gh-pages-workdir
-          cd gh-pages-workdir
+          cd gh-pages-workdir || exit 1
           git checkout --orphan gh-pages
           git rm -rf . 2>/dev/null || true
           echo "# GitHub Pages" > README.md
           git add README.md
           git commit -m "Initial gh-pages commit"
           git push origin gh-pages
+          # shellcheck disable=SC2103
           cd ..
-          echo "gh-pages-exists=true" >> $GITHUB_OUTPUT
+          echo "gh-pages-exists=true" >> "$GITHUB_OUTPUT"
         fi
 
     # Step 5: Deploy preview (deploy action only)
@@ -209,7 +210,7 @@ runs:
       if: inputs.action == 'deploy' && steps.clone.outputs.gh-pages-exists == 'true'
       shell: bash
       run: |
-        cd gh-pages-workdir
+        cd gh-pages-workdir || exit 1
 
         # Fetch latest changes
         git fetch origin gh-pages
@@ -228,6 +229,7 @@ runs:
           fi
         fi
 
+        # shellcheck disable=SC2103
         cd ..
 
         # Create PR preview directory
@@ -238,12 +240,12 @@ runs:
         cp -r "${{ steps.setup.outputs.source-dir }}"/* "gh-pages-workdir/$PREVIEW_PATH/"
 
         # Commit and push with retry logic
-        cd gh-pages-workdir
+        cd gh-pages-workdir || exit 1
         git add .
 
         if git diff --cached --quiet; then
           echo "No changes to deploy - preview is already up to date"
-          echo "has_changes=false" >> $GITHUB_OUTPUT
+          echo "has_changes=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
@@ -264,7 +266,7 @@ runs:
 
           echo "Push failed on attempt $i"
 
-          if [ $i -lt $MAX_RETRIES ]; then
+          if [ "$i" -lt "$MAX_RETRIES" ]; then
             git fetch origin gh-pages
 
             if ! git pull --rebase origin gh-pages; then
@@ -282,16 +284,16 @@ runs:
             JITTER=$((RANDOM % 3))
             SLEEP_TIME=$((BACKOFF + JITTER))
             echo "Waiting ${SLEEP_TIME} seconds before retry..."
-            sleep $SLEEP_TIME
+            sleep "$SLEEP_TIME"
           fi
         done
 
-        if [ $PUSH_SUCCESS -eq 0 ]; then
+        if [ "$PUSH_SUCCESS" -eq 0 ]; then
           echo "::error::Failed to push to gh-pages after $MAX_RETRIES attempts"
           exit 1
         fi
 
-        echo "has_changes=true" >> $GITHUB_OUTPUT
+        echo "has_changes=true" >> "$GITHUB_OUTPUT"
 
     # Step 6: Cleanup preview (cleanup action only)
     # Scans all PR preview directories and removes those for closed PRs
@@ -302,7 +304,7 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.token }}
       run: |
-        cd gh-pages-workdir
+        cd gh-pages-workdir || exit 1
 
         # Fetch latest changes
         git fetch origin gh-pages
@@ -325,7 +327,7 @@ runs:
 
         if [ ! -d "$PREFIX" ]; then
           echo "No preview directory found"
-          echo "has_changes=false" >> $GITHUB_OUTPUT
+          echo "has_changes=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
@@ -355,9 +357,9 @@ runs:
           fi
         done
 
-        if [ $REMOVED -eq 0 ]; then
+        if [ "$REMOVED" -eq 0 ]; then
           echo "No closed PR previews to remove"
-          echo "has_changes=false" >> $GITHUB_OUTPUT
+          echo "has_changes=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
@@ -371,7 +373,7 @@ runs:
 
         if git diff --cached --quiet; then
           echo "No changes to commit"
-          echo "has_changes=false" >> $GITHUB_OUTPUT
+          echo "has_changes=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
@@ -392,7 +394,7 @@ runs:
 
           echo "Push failed on attempt $i"
 
-          if [ $i -lt $MAX_RETRIES ]; then
+          if [ "$i" -lt "$MAX_RETRIES" ]; then
             git fetch origin gh-pages
 
             if ! git pull --rebase origin gh-pages; then
@@ -410,16 +412,16 @@ runs:
             JITTER=$((RANDOM % 3))
             SLEEP_TIME=$((BACKOFF + JITTER))
             echo "Waiting ${SLEEP_TIME} seconds before retry..."
-            sleep $SLEEP_TIME
+            sleep "$SLEEP_TIME"
           fi
         done
 
-        if [ $PUSH_SUCCESS -eq 0 ]; then
+        if [ "$PUSH_SUCCESS" -eq 0 ]; then
           echo "::error::Failed to push to gh-pages after $MAX_RETRIES attempts"
           exit 1
         fi
 
-        echo "has_changes=true" >> $GITHUB_OUTPUT
+        echo "has_changes=true" >> "$GITHUB_OUTPUT"
         echo "Successfully removed $REMOVED closed PR preview(s)"
 
     # Step 7: Wait for GitHub Pages deployment (deploy only)
@@ -500,4 +502,4 @@ runs:
       id: set-outputs
       shell: bash
       run: |
-        echo "preview-url=${{ steps.setup.outputs.preview-url }}" >> $GITHUB_OUTPUT
+        echo "preview-url=${{ steps.setup.outputs.preview-url }}" >> "$GITHUB_OUTPUT"

@@ -2,7 +2,9 @@
 
 A GitHub Action that automatically deploys pull request previews to GitHub Pages and cleans them up when the PR is closed.
 
-When a PR is opened or updated, this action deploys a preview to `https://your-site.github.io/repo/pr/<PR_NUMBER>/` and posts a comment with the preview URL.
+When a PR is opened or updated, this action deploys a preview to
+`https://your-site.github.io/repo/pr/<PR_NUMBER>/` and posts a comment with
+the preview URL.
 
 ## Features
 
@@ -109,7 +111,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-> **Note**: Since v1.1.0, cleanup scans all PR preview directories and removes those for closed PRs. This makes cleanup idempotent — if a cleanup run is cancelled by concurrency, the next run will handle all pending removals.
+> **Note**: Since v1.1.0, cleanup scans all PR preview directories and removes those
+> for closed PRs. This makes cleanup idempotent — if a cleanup run is cancelled by
+> concurrency, the next run will handle all pending removals.
 
 ## Inputs
 
@@ -165,7 +169,7 @@ permissions:
 
 ## Directory Structure on gh-pages
 
-```
+```text
 gh-pages/
 ├── index.html (main site)
 ├── [other main site files]
@@ -188,7 +192,10 @@ concurrency:
   cancel-in-progress: false
 ```
 
-> **Important**: Use `cancel-in-progress: false` for both deploy and cleanup workflows. Using `cancel-in-progress: true` would cancel other jobs in the same concurrency group (e.g., production deploys). Cleanup is idempotent since v1.1.0, so cancelled pending cleanups are safely handled by subsequent runs.
+> **Important**: Use `cancel-in-progress: false` for both deploy and cleanup workflows.
+> Using `cancel-in-progress: true` would cancel other jobs in the same concurrency group
+> (e.g., production deploys). Cleanup is idempotent since v1.1.0, so cancelled pending
+> cleanups are safely handled by subsequent runs.
 
 ## Build Configuration
 
@@ -258,17 +265,25 @@ Create a dynamic config in your workflow:
 ### Push conflicts
 
 Both deploy and cleanup use exponential backoff retry (up to 5 attempts) to handle concurrent pushes. If you still see conflicts:
+
 - Ensure all workflows use the same concurrency group
 - Set `cancel-in-progress: false` for **both deploy and cleanup** workflows to prevent cancellation during deployment
 
 ### PR preview deployments are skipped or cancelled
 
-If you get many PRs at once (e.g. from Dependabot batches) and notice that some `pr-preview` deploys never run or finish as `cancelled`, check your **cleanup** workflow's `cancel-in-progress` setting:
+If you get many PRs at once (e.g. from Dependabot batches) and notice that some
+`pr-preview` deploys never run or finish as `cancelled`, check your **cleanup**
+workflow's `cancel-in-progress` setting:
 
-- ❌ `cancel-in-progress: true` on a cleanup workflow that shares the `github-pages-deployment` group will cancel pending **deploy** runs in the same group, dropping previews on the floor.
-- ✅ Set `cancel-in-progress: false` on **both** deploy and cleanup workflows. Cleanup is idempotent since v1.1.0, so cancelled cleanups are safely picked up by subsequent runs.
+- ❌ `cancel-in-progress: true` on a cleanup workflow that shares the
+  `github-pages-deployment` group will cancel pending **deploy** runs in the
+  same group, dropping previews on the floor.
+- ✅ Set `cancel-in-progress: false` on **both** deploy and cleanup workflows.
+  Cleanup is idempotent since v1.1.0, so cancelled cleanups are safely picked up
+  by subsequent runs.
 
-Older versions of this README briefly recommended `cancel-in-progress: true` for cleanup; if you copied from an older example, update it to `false`.
+Older versions of this README briefly recommended `cancel-in-progress: true` for
+cleanup; if you copied from an older example, update it to `false`.
 
 ### Comment not appearing
 
