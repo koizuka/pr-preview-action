@@ -130,3 +130,32 @@ jobs:
             exit 1
           fi
           echo "All action references are SHA-pinned."
+
+  # Aggregate result of all checks above. Configure this single job as the
+  # required status check in branch protection so individual lint jobs can be
+  # added or removed without re-editing the protection rule.
+  all-checks:
+    name: All checks passed
+    if: always()
+    needs:
+      - actionlint
+      - action-schema
+      - shellcheck-action
+      - yamllint
+      - markdownlint
+      - hash-pin-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every required job succeeded
+        run: |
+          set -euo pipefail
+          results="${{ join(needs.*.result, ',') }}"
+          echo "Upstream results: $results"
+          IFS=',' read -ra arr <<< "$results"
+          for r in "${arr[@]}"; do
+            if [ "$r" != "success" ]; then
+              echo "::error::At least one required job did not succeed (got: $r)"
+              exit 1
+            fi
+          done
+          echo "All required jobs succeeded."
