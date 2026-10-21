@@ -94,6 +94,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: read
 
 concurrency:
   group: "github-pages-deployment"
@@ -143,8 +144,12 @@ jobs:
 ```yaml
 permissions:
   contents: write      # For pushing to gh-pages
-  pull-requests: write # For PR comments (deploy only)
+  pull-requests: write # For PR comments (deploy) and PR state lookup (cleanup; read is enough)
 ```
+
+> **Note**: Cleanup keeps any preview whose PR state cannot be read (with a warning),
+> so without `pull-requests: read` only the preview of the PR that triggered the
+> `closed` event is removed.
 
 ## How It Works
 
@@ -264,7 +269,10 @@ Create a dynamic config in your workflow:
 
 ### Push conflicts
 
-Both deploy and cleanup use exponential backoff retry (up to 5 attempts) to handle concurrent pushes. If you still see conflicts:
+Both deploy and cleanup use exponential backoff retry (up to 5 attempts) to handle concurrent pushes.
+Each attempt redoes the change on top of the latest `gh-pages` instead of rebasing, so another
+workflow rewriting the branch (e.g. a production deploy) does not cause rebase conflicts.
+If pushes still fail:
 
 - Ensure all workflows use the same concurrency group
 - Set `cancel-in-progress: false` for **both deploy and cleanup** workflows to prevent cancellation during deployment
