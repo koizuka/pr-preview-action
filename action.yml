@@ -205,51 +205,18 @@ runs:
         fi
 
     # Step 5: Deploy preview (deploy action only)
+    # Each push attempt rebuilds the commit on top of the latest gh-pages instead of
+    # rebasing: another workflow (e.g. a production deploy) may have rewritten files
+    # with identical content, which git misdetects as renames and reports as conflicts.
     - name: Deploy to PR subdirectory
       id: deploy
       if: inputs.action == 'deploy' && steps.clone.outputs.gh-pages-exists == 'true'
       shell: bash
       run: |
-        cd gh-pages-workdir || exit 1
-
-        # Fetch latest changes
-        git fetch origin gh-pages
-
-        # Rebase if there are remote changes
-        if ! git diff --quiet HEAD origin/gh-pages 2>/dev/null; then
-          echo "Remote changes detected, rebasing..."
-          if ! git pull --rebase origin gh-pages; then
-            if [ -d ".git/rebase-merge" ] || [ -d ".git/rebase-apply" ]; then
-              echo "::error::Rebase conflict detected"
-              git rebase --abort
-            else
-              echo "::error::Failed to rebase"
-            fi
-            exit 1
-          fi
-        fi
-
-        # shellcheck disable=SC2103
-        cd ..
-
-        # Create PR preview directory
+        SOURCE_DIR="$(cd "${{ steps.setup.outputs.source-dir }}" && pwd)"
         PREVIEW_PATH="${{ steps.setup.outputs.preview-path }}"
-        mkdir -p "gh-pages-workdir/$PREVIEW_PATH"
 
-        # Copy built files
-        cp -r "${{ steps.setup.outputs.source-dir }}"/* "gh-pages-workdir/$PREVIEW_PATH/"
-
-        # Commit and push with retry logic
         cd gh-pages-workdir || exit 1
-        git add .
-
-        if git diff --cached --quiet; then
-          echo "No changes to deploy - preview is already up to date"
-          echo "has_changes=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        git commit -m "Deploy PR #${{ steps.setup.outputs.pr-number }} preview"
 
         # Retry push with exponential backoff
         PUSH_SUCCESS=0
@@ -257,6 +224,24 @@ runs:
 
         for i in $(seq 1 $MAX_RETRIES); do
           echo "Push attempt $i of $MAX_RETRIES..."
+
+          git fetch origin gh-pages
+          git reset --hard origin/gh-pages
+          git clean -fd
+
+          # Create PR preview directory and copy built files
+          mkdir -p "$PREVIEW_PATH"
+          cp -r "$SOURCE_DIR"/* "$PREVIEW_PATH/"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes to deploy - preview is already up to date"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "Deploy PR #${{ steps.setup.outputs.pr-number }} preview"
 
           if git push origin gh-pages 2>&1; then
             echo "Successfully pushed to gh-pages on attempt $i"
@@ -267,18 +252,6 @@ runs:
           echo "Push failed on attempt $i"
 
           if [ "$i" -lt "$MAX_RETRIES" ]; then
-            git fetch origin gh-pages
-
-            if ! git pull --rebase origin gh-pages; then
-              if [ -d ".git/rebase-merge" ] || [ -d ".git/rebase-apply" ]; then
-                echo "::error::Rebase conflict detected in retry loop"
-                git rebase --abort
-              else
-                echo "::error::Failed to rebase in retry loop"
-              fi
-              exit 1
-            fi
-
             # Exponential backoff with jitter
             BACKOFF=$((2 ** i))
             JITTER=$((RANDOM % 3))
@@ -296,7 +269,8 @@ runs:
         echo "has_changes=true" >> "$GITHUB_OUTPUT"
 
     # Step 6: Cleanup preview (cleanup action only)
-    # Scans all PR preview directories and removes those for closed PRs
+    # Scans all PR preview directories and removes those for closed PRs.
+    # Like deploy, each push attempt redoes the removal on top of the latest gh-pages.
     - name: Remove closed PR previews
       id: cleanup
       if: inputs.action == 'cleanup' && steps.clone.outputs.gh-pages-exists == 'true'
@@ -306,24 +280,14 @@ runs:
       run: |
         cd gh-pages-workdir || exit 1
 
-        # Fetch latest changes
-        git fetch origin gh-pages
-
-        # Rebase if there are remote changes
-        if ! git diff --quiet HEAD origin/gh-pages 2>/dev/null; then
-          echo "Remote changes detected, rebasing..."
-          if ! git pull --rebase origin gh-pages; then
-            if [ -d ".git/rebase-merge" ] || [ -d ".git/rebase-apply" ]; then
-              echo "::error::Rebase conflict detected"
-              git rebase --abort
-            else
-              echo "::error::Failed to rebase"
-            fi
-            exit 1
-          fi
-        fi
-
         PREFIX="${{ inputs.preview-path-prefix }}"
+
+        # The PR whose close event triggered this run is known to be closed without
+        # asking the API
+        CLOSED_PR=""
+        if [ "${{ github.event.action }}" = "closed" ]; then
+          CLOSED_PR="${{ steps.setup.outputs.pr-number }}"
+        fi
 
         if [ ! -d "$PREFIX" ]; then
           echo "No preview directory found"
@@ -331,9 +295,8 @@ runs:
           exit 0
         fi
 
-        # Scan all PR preview directories and remove closed ones
-        REMOVED=0
-        REMOVED_LIST=""
+        # Decide which previews to remove (once, so retries don't re-query the API)
+        REMOVE=()
         for dir in "$PREFIX"/*/; do
           [ -d "$dir" ] || continue
           pr_num=$(basename "$dir")
@@ -344,40 +307,30 @@ runs:
             continue
           fi
 
-          # Check PR state via GitHub API
-          state=$(gh api "repos/${{ github.repository }}/pulls/${pr_num}" --jq '.state' 2>/dev/null || echo "unknown")
+          if [ "$pr_num" = "$CLOSED_PR" ]; then
+            state="closed"
+          elif ! state=$(gh api "repos/${{ github.repository }}/pulls/${pr_num}" --jq '.state' 2>/dev/null); then
+            # Keep previews whose state is unknown rather than deleting open PRs' previews
+            echo "::warning::Could not get the state of PR #${pr_num}; keeping its preview. Grant 'pull-requests: read' to the workflow."
+            continue
+          fi
 
           if [ "$state" != "open" ]; then
             echo "Removing preview for PR #${pr_num} (state: ${state})"
-            rm -rf "$dir"
-            REMOVED=$((REMOVED + 1))
-            REMOVED_LIST="${REMOVED_LIST:+$REMOVED_LIST, }#${pr_num}"
+            REMOVE+=("$pr_num")
           else
             echo "Keeping preview for PR #${pr_num} (state: open)"
           fi
         done
 
-        if [ "$REMOVED" -eq 0 ]; then
+        if [ "${#REMOVE[@]}" -eq 0 ]; then
           echo "No closed PR previews to remove"
           echo "has_changes=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
-        # Remove prefix directory if empty
-        if [ -d "$PREFIX" ] && [ -z "$(ls -A "$PREFIX")" ]; then
-          echo "Removing empty $PREFIX directory"
-          rm -rf "$PREFIX"
-        fi
-
-        git add .
-
-        if git diff --cached --quiet; then
-          echo "No changes to commit"
-          echo "has_changes=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        git commit -m "Remove closed PR previews ($REMOVED_LIST)"
+        REMOVED_LIST=$(printf '#%s, ' "${REMOVE[@]}")
+        REMOVED_LIST="${REMOVED_LIST%, }"
 
         # Retry push with exponential backoff
         PUSH_SUCCESS=0
@@ -385,6 +338,31 @@ runs:
 
         for i in $(seq 1 $MAX_RETRIES); do
           echo "Push attempt $i of $MAX_RETRIES..."
+
+          git fetch origin gh-pages
+          git reset --hard origin/gh-pages
+          git clean -fd
+
+          for pr_num in "${REMOVE[@]}"; do
+            rm -rf "${PREFIX:?}/$pr_num"
+          done
+
+          # Remove prefix directory if empty
+          if [ -d "$PREFIX" ] && [ -z "$(ls -A "$PREFIX")" ]; then
+            echo "Removing empty $PREFIX directory"
+            rm -rf "$PREFIX"
+          fi
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            # e.g. a production deploy replaced gh-pages and already dropped them
+            echo "Previews are already removed - nothing to commit"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "Remove closed PR previews ($REMOVED_LIST)"
 
           if git push origin gh-pages 2>&1; then
             echo "Successfully pushed to gh-pages on attempt $i"
@@ -395,18 +373,6 @@ runs:
           echo "Push failed on attempt $i"
 
           if [ "$i" -lt "$MAX_RETRIES" ]; then
-            git fetch origin gh-pages
-
-            if ! git pull --rebase origin gh-pages; then
-              if [ -d ".git/rebase-merge" ] || [ -d ".git/rebase-apply" ]; then
-                echo "::error::Rebase conflict detected in retry loop"
-                git rebase --abort
-              else
-                echo "::error::Failed to rebase in retry loop"
-              fi
-              exit 1
-            fi
-
             # Exponential backoff with jitter
             BACKOFF=$((2 ** i))
             JITTER=$((RANDOM % 3))
@@ -422,7 +388,7 @@ runs:
         fi
 
         echo "has_changes=true" >> "$GITHUB_OUTPUT"
-        echo "Successfully removed $REMOVED closed PR preview(s)"
+        echo "Successfully removed ${#REMOVE[@]} closed PR preview(s)"
 
     # Step 7: Wait for GitHub Pages deployment (deploy only)
     - name: Wait for GitHub Pages deployment
